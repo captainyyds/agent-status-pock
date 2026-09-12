@@ -126,6 +126,12 @@ final class AgentHub: @unchecked Sendable {
         return enabledAgents[agent] ?? true
     }
 
+    /// Hard ceiling for events.log. Every event carries a slice of the user's
+    /// command line, so the file is capped rather than left to grow without
+    /// bound; past the ceiling the oldest half goes.
+    private static let logSizeLimit = 100 * 1024
+    private static let logSizeAfterTrim = 50 * 1024
+
     private func log(_ message: String) {
         let logDir = (FileManager.default.homeDirectoryForCurrentUser.path as NSString)
             .appendingPathComponent(".agentbridge/logs")
@@ -136,9 +142,25 @@ final class AgentHub: @unchecked Sendable {
             handle.seekToEndOfFile()
             handle.write(line.data(using: .utf8) ?? Data())
             try? handle.close()
+            trimIfOversized(at: path)
         } else {
             try? line.write(toFile: path, atomically: true, encoding: .utf8)
         }
+    }
+
+    /// Drops the head of the log once it outgrows the ceiling. The cut lands on
+    /// a newline, so the file never opens mid-entry, and the rewrite is atomic
+    /// because the append handle above is already closed.
+    private func trimIfOversized(at path: String) {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+        let size = (attributes?[.size] as? NSNumber)?.intValue ?? 0
+        guard size > Self.logSizeLimit,
+              let data = FileManager.default.contents(atPath: path) else { return }
+        var tail = data.suffix(Self.logSizeAfterTrim)
+        if let newline = tail.firstIndex(of: 0x0A) {
+            tail = tail[tail.index(after: newline)...]
+        }
+        try? Data(tail).write(to: URL(fileURLWithPath: path), options: .atomic)
     }
 
     // MARK: Events
