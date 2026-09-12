@@ -14,6 +14,11 @@ final class ExpandedController: PKTouchBarController {
 
     /// Room for the collapse control and the agent mark, both on the left.
     private static let iconStrip: CGFloat = 64
+
+    /// Only this strip collapses the bar. Dismiss-on-any-tap reads as a
+    /// misfire: the expanded bar is something you opened in order to read,
+    /// and brushing the command you came to look at should not close it.
+    private static let collapseZone: CGFloat = 34
     private static let barHeight: CGFloat = 30
     private static let gutter: CGFloat = 22
 
@@ -195,7 +200,7 @@ final class ExpandedController: PKTouchBarController {
             self.layoutFields(self.currentFields)
         }
 
-        let tap = NSClickGestureRecognizer(target: self, action: #selector(handleTap))
+        let tap = NSClickGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         tap.allowedTouchTypes = .direct
         container.addGestureRecognizer(tap)
 
@@ -204,7 +209,8 @@ final class ExpandedController: PKTouchBarController {
         return item
     }
 
-    @objc private func handleTap() {
+    @objc private func handleTap(_ gesture: NSClickGestureRecognizer) {
+        guard gesture.location(in: container).x < Self.collapseZone else { return }
         hide()
     }
 
