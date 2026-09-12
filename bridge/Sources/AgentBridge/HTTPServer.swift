@@ -5,7 +5,18 @@ import Foundation
 struct HTTPRequest {
     var method: String = "GET"
     var path: String = "/"
+    var version: String = "HTTP/1.1"
+    var connection: String = ""
     var body: Data = Data()
+
+    /// RFC 7230: 1.1 holds the connection open unless asked not to, 1.0 only
+    /// when asked to.
+    var wantsKeepAlive: Bool {
+        let token = connection.lowercased()
+        if token.contains("close") { return false }
+        if version.hasSuffix("1.0") { return token.contains("keep-alive") }
+        return true
+    }
 
     func jsonBody() -> [String: Any]? {
         guard !body.isEmpty else { return nil }
@@ -21,6 +32,10 @@ final class HTTPServer: @unchecked Sendable {
     private let port: UInt16
     private var listenFd: Int32 = -1
     private var running = true
+
+    /// How long a kept-alive connection may sit idle. Each connection owns a
+    /// thread, so one that goes quiet has to be let go.
+    private static let idleTimeout: Int32 = 15
 
     init(hub: AgentHub, port: UInt16) {
         self.hub = hub
@@ -66,16 +81,47 @@ final class HTTPServer: @unchecked Sendable {
 
     // MARK: Connection handling
 
-    private func handle(_ fd: Int32) {
-        defer { close(fd) }
-        guard let request = readRequest(fd) else {
-            writeResponse(fd, status: 400, json: ["error": "bad request"])
-            return
-        }
-        route(request, fd: fd)
+    private enum ReadOutcome {
+        case request(HTTPRequest)
+        /// The peer hung up, or the connection sat idle past the ceiling.
+        case closed
+        case malformed
     }
 
-    private func readRequest(_ fd: Int32) -> HTTPRequest? {
+    private func setReadTimeout(_ fd: Int32, seconds: Int32) {
+        var timeout = timeval(tv_sec: Int(seconds), tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    }
+
+    /// Serves requests on one connection until the peer goes away, the
+    /// connection sits idle, or a request asks to close.
+    ///
+    /// The widget polls several times a second. Closing after every response
+    /// turned each poll into a fresh TCP connection, and the spent sockets
+    /// piled into TIME_WAIT faster than the kernel drained them.
+    private func handle(_ fd: Int32) {
+        defer { close(fd) }
+        setReadTimeout(fd, seconds: Self.idleTimeout)
+
+        while running {
+            switch readRequest(fd) {
+            case .closed:
+                return
+            case .malformed:
+                writeResponse(fd, status: 400, json: ["error": "bad request"], keepAlive: false)
+                return
+            case .request(let request):
+                let keepAlive = request.wantsKeepAlive
+                route(request, fd: fd, keepAlive: keepAlive)
+                guard keepAlive else { return }
+            }
+        }
+    }
+
+    /// Reads one request. Assumes the peer waits for each response before
+    /// sending the next, which every client here does; a pipelined request
+    /// arriving inside the same read would be dropped.
+    private func readRequest(_ fd: Int32) -> ReadOutcome {
         var buffer = [UInt8](repeating: 0, count: 65536)
         var total = 0
         var headerEnd: Int?
@@ -92,24 +138,32 @@ final class HTTPServer: @unchecked Sendable {
             }
         }
 
-        guard total > 0, let headerLength = headerEnd else { return nil }
+        // Nothing at all means the peer closed or the read timed out.
+        guard total > 0 else { return .closed }
+        guard let headerLength = headerEnd else { return .malformed }
         let headerData = Data(buffer[0..<headerLength])
-        guard let headerString = String(data: headerData, encoding: .utf8) else { return nil }
+        guard let headerString = String(data: headerData, encoding: .utf8) else { return .malformed }
 
         let lines = headerString.components(separatedBy: "\r\n")
-        guard let requestLine = lines.first else { return nil }
+        guard let requestLine = lines.first else { return .malformed }
         let parts = requestLine.split(separator: " ")
-        guard parts.count >= 2 else { return nil }
+        guard parts.count >= 2 else { return .malformed }
 
         var request = HTTPRequest()
         request.method = String(parts[0]).uppercased()
         request.path = String(parts[1])
+        if parts.count >= 3 { request.version = String(parts[2]) }
 
         var contentLength = 0
         for line in lines.dropFirst() {
             let kv = line.split(separator: ":", maxSplits: 1)
-            if kv.count == 2, kv[0].trimmingCharacters(in: .whitespaces).lowercased() == "content-length" {
-                contentLength = Int(kv[1].trimmingCharacters(in: .whitespaces)) ?? 0
+            guard kv.count == 2 else { continue }
+            let name = kv[0].trimmingCharacters(in: .whitespaces).lowercased()
+            let value = kv[1].trimmingCharacters(in: .whitespaces)
+            if name == "content-length" {
+                contentLength = Int(value) ?? 0
+            } else if name == "connection" {
+                request.connection = value
             }
         }
 
@@ -123,25 +177,25 @@ final class HTTPServer: @unchecked Sendable {
             }
             request.body = body.prefix(contentLength)
         }
-        return request
+        return .request(request)
     }
 
     // MARK: Router
 
-    private func route(_ request: HTTPRequest, fd: Int32) {
+    private func route(_ request: HTTPRequest, fd: Int32, keepAlive: Bool) {
         let path = request.path.split(separator: "?").first.map(String.init) ?? request.path
 
         switch (request.method, path) {
         case ("GET", "/v1/health"):
-            writeResponse(fd, status: 200, json: ["ok": true])
+            writeResponse(fd, status: 200, json: ["ok": true], keepAlive: keepAlive)
 
         case ("GET", "/v1/state"):
             let state = hub.snapshot()
-            writeResponse(fd, status: 200, encodable: state)
+            writeResponse(fd, status: 200, encodable: state, keepAlive: keepAlive)
 
         case ("POST", "/v1/event"):
             guard let body = request.jsonBody() else {
-                writeResponse(fd, status: 400, json: ["error": "invalid body"])
+                writeResponse(fd, status: 400, json: ["error": "invalid body"], keepAlive: keepAlive)
                 return
             }
             let agent = AgentID(rawValue: body["agent"] as? String ?? "") ?? .claude
@@ -150,28 +204,28 @@ final class HTTPServer: @unchecked Sendable {
             let detail = body["detail"] as? String
             let ts = body["ts"] as? Double
             hub.record(event: event, agent: agent, tool: tool, detail: detail, ts: ts)
-            writeResponse(fd, status: 200, json: ["ok": true])
+            writeResponse(fd, status: 200, json: ["ok": true], keepAlive: keepAlive)
 
         default:
-            writeResponse(fd, status: 404, json: ["error": "not found"])
+            writeResponse(fd, status: 404, json: ["error": "not found"], keepAlive: keepAlive)
         }
     }
 
     // MARK: Response writer
 
-    private func writeResponse(_ fd: Int32, status: Int, json: [String: Any]) {
+    private func writeResponse(_ fd: Int32, status: Int, json: [String: Any], keepAlive: Bool) {
         let data = (try? JSONSerialization.data(withJSONObject: json, options: [])) ?? Data("{}".utf8)
-        write(fd, data: data, status: status)
+        write(fd, data: data, status: status, keepAlive: keepAlive)
     }
 
-    private func writeResponse(_ fd: Int32, status: Int, encodable: Encodable) {
+    private func writeResponse(_ fd: Int32, status: Int, encodable: Encodable, keepAlive: Bool) {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = (try? encoder.encode(encodable)) ?? Data("{}".utf8)
-        write(fd, data: data, status: status)
+        write(fd, data: data, status: status, keepAlive: keepAlive)
     }
 
-    private func write(_ fd: Int32, data: Data, status: Int) {
+    private func write(_ fd: Int32, data: Data, status: Int, keepAlive: Bool) {
         let reason: String
         switch status {
         case 200: reason = "OK"
@@ -182,7 +236,12 @@ final class HTTPServer: @unchecked Sendable {
         var head = "HTTP/1.1 \(status) \(reason)\r\n"
         head += "Content-Type: application/json\r\n"
         head += "Content-Length: \(data.count)\r\n"
-        head += "Connection: close\r\n\r\n"
+        if keepAlive {
+            head += "Connection: keep-alive\r\n"
+            head += "Keep-Alive: timeout=\(Self.idleTimeout)\r\n\r\n"
+        } else {
+            head += "Connection: close\r\n\r\n"
+        }
         var out = Data(head.utf8)
         out.append(data)
         out.withUnsafeBytes { buffer in
