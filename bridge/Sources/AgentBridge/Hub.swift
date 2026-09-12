@@ -44,6 +44,32 @@ enum AgentStatus: String, Codable {
     case responseReady     // transient: answer just finished
 }
 
+/// One rate-limit window: how much of it is spent, and when it refills.
+struct UsageWindow: Codable {
+    var usedPercent: Double
+    var resetsAt: TimeInterval
+}
+
+/// What an agent has left. Claude reports this through its status line; Codex
+/// writes it into its own session log. Either way it reaches us locally.
+struct AgentUsage: Codable {
+    var fiveHour: UsageWindow?
+    var sevenDay: UsageWindow?
+    /// Context the newest turn carried. Stands in for Claude, whose limits are
+    /// not published anywhere this side of the status line.
+    var contextTokens: Int?
+    /// Wall time from the session's first entry to its last.
+    var sessionSeconds: Double?
+    /// Model the newest turn ran on, as the agent names it.
+    var model: String?
+    /// Size of that model's context window, when the agent states it. Without
+    /// it `contextTokens` can only be shown as a count, never as a share.
+    var contextWindow: Int?
+    /// Directory the agent is working in, when its own logs record one.
+    var cwd: String?
+    var updatedAt: TimeInterval
+}
+
 struct AgentSnapshot: Codable {
     let agent: AgentID
     let name: String
@@ -55,6 +81,10 @@ struct AgentSnapshot: Codable {
     var detail: String?
     var lastActive: TimeInterval
     var transientUntil: TimeInterval?
+    /// Directory the agent is working in, as last reported by a hook.
+    var cwd: String?
+    /// Absent until the agent has reported its limits at least once.
+    var usage: AgentUsage?
 }
 
 struct BridgeState: Codable {
@@ -67,6 +97,7 @@ final class AgentHub: @unchecked Sendable {
 
     private let lock = NSLock()
     private var statuses: [AgentID: AgentSnapshot] = [:]
+    private var usage: [AgentID: AgentUsage] = [:]
     // Per-agent ordering + display-dwell bookkeeping.
     private var lastEventAt: [AgentID: Double] = [:]
     private var labelSetAt: [AgentID: Double] = [:]
@@ -76,6 +107,11 @@ final class AgentHub: @unchecked Sendable {
     private let toolDisplayDwell: Double = 1.2
     /// Events older than the newest applied one (minus tolerance) are stale.
     private let staleTolerance: Double = 0.05
+
+    /// How long "ready" outlives its last event before it lapses to idle.
+    /// Long enough to sit through a coffee, short enough that a closed app
+    /// stops showing as open.
+    private static let readyLapse: Double = 10 * 60
 
     private struct HeldEvent {
         let event: String
@@ -96,7 +132,8 @@ final class AgentHub: @unchecked Sendable {
                 tool: nil,
                 detail: nil,
                 lastActive: 0,
-                transientUntil: nil
+                transientUntil: nil,
+                cwd: nil
             )
         }
     }
@@ -143,7 +180,12 @@ final class AgentHub: @unchecked Sendable {
 
     // MARK: Events
 
-    func record(event: String, agent: AgentID, tool: String?, detail: String?, ts: Double?) {
+    func record(event: String, agent: AgentID, tool: String?, detail: String?, ts: Double?, cwd: String? = nil) {
+        if let cwd, !cwd.isEmpty {
+            lock.lock()
+            statuses[agent]?.cwd = cwd
+            lock.unlock()
+        }
         lock.lock()
 
         guard isEnabled(agent) else {
@@ -163,10 +205,27 @@ final class AgentHub: @unchecked Sendable {
         }
         lastEventAt[agent] = eventTime
 
+        let now = Date().timeIntervalSince1970
+
+        // A finished turn reports "Response ready" for a few seconds. Claude
+        // Code then emits a trailing `thinking` a second or two later — the
+        // tail of its own bookkeeping rather than new work — and that wiped
+        // out the one signal saying an answer is waiting, leaving the bar on
+        // "Thinking" until the 45s inactivity timeout. Hold the window against
+        // it. Anything that means real activity (a tool, an answer, a
+        // question) still breaks through immediately.
+        if event == "thinking",
+           let current = statuses[agent],
+           current.status == .responseReady,
+           let until = current.transientUntil, until > now {
+            lock.unlock()
+            log("[\(agent.rawValue)] ignored trailing 'thinking' inside the response-ready window")
+            return
+        }
+
         // Display dwell: keep an active tool state visible for at least
         // `toolDisplayDwell` before a quieter state replaces it, so fast
         // tools (Read/Edit in <300ms) don't flick by unseen.
-        let now = Date().timeIntervalSince1970
         if let current = statuses[agent],
            current.status == .working,
            isQuietTransition(event),
@@ -209,7 +268,8 @@ final class AgentHub: @unchecked Sendable {
     private func apply(event: String, agent: AgentID, tool: String?, detail: String?, eventTime: Double) {
         var status = statuses[agent] ?? AgentSnapshot(
             agent: agent, name: agent.displayName, symbol: agent.symbol, color: agent.color,
-            status: .idle, label: "No agent running", tool: nil, detail: nil, lastActive: 0, transientUntil: nil
+            status: .idle, label: "No agent running", tool: nil, detail: nil,
+            lastActive: 0, transientUntil: nil, cwd: nil
         )
         let now = Date().timeIntervalSince1970
         status.lastActive = now
@@ -296,6 +356,41 @@ final class AgentHub: @unchecked Sendable {
         log("[\(agent.rawValue)] \(event) tool=\(tool ?? "-") detail=\((detail ?? "-").prefix(60))")
     }
 
+    /// Stores limits reported by an agent. Claude posts these to `/v1/usage`
+    /// from its status line, the only place Claude Code hands them out.
+    func recordUsage(_ reported: AgentUsage, for agent: AgentID) {
+        lock.lock()
+        defer { lock.unlock() }
+        usage[agent] = reported
+    }
+
+    /// Picks up Codex's limits from its session log. Codex has no hook that
+    /// carries them, but it writes them to disk on every turn.
+    func refreshCodexUsage() {
+        guard let read = CodexUsage.read() else { return }
+        lock.lock()
+        usage[.codex] = read
+        lock.unlock()
+    }
+
+    /// Claude reports no windows, so its entry carries context size instead.
+    /// A window posted to `/v1/usage` by a status line still wins if one ever
+    /// arrives, so this only fills what is otherwise empty.
+    func refreshClaudeUsage() {
+        guard let read = ClaudeUsage.read() else { return }
+        lock.lock()
+        var entry = usage[.claude] ?? AgentUsage(
+            fiveHour: nil, sevenDay: nil, contextTokens: nil, sessionSeconds: nil,
+            model: nil, contextWindow: nil, cwd: nil, updatedAt: 0
+        )
+        entry.contextTokens = read.contextTokens
+        entry.sessionSeconds = read.sessionSeconds
+        entry.model = read.model
+        entry.updatedAt = Date().timeIntervalSince1970
+        usage[.claude] = entry
+        lock.unlock()
+    }
+
     func snapshot() -> BridgeState {
         lock.lock()
         defer { lock.unlock() }
@@ -305,6 +400,7 @@ final class AgentHub: @unchecked Sendable {
             .filter { isEnabled($0.agent) }
             .map { snapshot -> AgentSnapshot in
                 var s = snapshot
+                s.usage = usage[s.agent]
                 if let until = s.transientUntil, until < now {
                     s.transientUntil = nil
                     switch s.status {
@@ -331,6 +427,13 @@ final class AgentHub: @unchecked Sendable {
                     s.tool = nil
                     s.detail = nil
                     s.transientUntil = nil
+                }
+                // An agent quit without a SessionEnd — the app was closed, or
+                // the terminal went away — leaves "ready" standing for ever.
+                // Let it lapse so the bar stops claiming a session is open.
+                if s.status == .ready, now - s.lastActive > Self.readyLapse {
+                    s.status = .idle
+                    s.label = "No agent running"
                 }
                 return s
             }

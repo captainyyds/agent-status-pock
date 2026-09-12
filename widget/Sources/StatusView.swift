@@ -12,16 +12,31 @@ final class StatusView: NSView {
 
     /// Bounded width: wide enough for useful status text, but leaves room
     /// for Pock widgets and the system control strip on either side.
+    /// Fixed while active. The view is laid out from its frame rather than
+    /// its intrinsic size, so resizing it to fit the text drew over the
+    /// neighbouring widget instead of pushing it along. Long text is handled
+    /// by shrinking the type instead — see `ShimmerLabel.fit(to:)`.
     static let preferredWidth: CGFloat = 360
 
     // MARK: Callbacks
 
     var onTap: (() -> Void)?
+    var onExpand: (() -> Void)?
+
+    /// Bundle id of the agent app in front, when it is one. The bar follows
+    /// whatever the user switched to rather than whatever spoke last.
+    var preferredAgent: String? {
+        didSet { guard preferredAgent != oldValue else { return }; pinned = false; refresh() } }
+
+    /// Tap target on the left that opens the full-bar view. Wide enough to
+    /// hit without looking, which is the whole point of a Touch Bar control.
+    private static let expandZone: CGFloat = 38
 
     // MARK: Subviews
 
     private let iconView = NSImageView(frame: .zero)
     private let label = ShimmerLabel(frame: .zero)
+    private let expandIcon = NSImageView(frame: .zero)
 
     // MARK: State
 
@@ -47,10 +62,17 @@ final class StatusView: NSView {
         iconView.imageScaling = .scaleProportionallyDown
         iconView.contentTintColor = .white
         iconView.wantsLayer = true
+        expandIcon.image = NSImage(
+            systemSymbolName: "arrow.up.left.and.arrow.down.right",
+            accessibilityDescription: "Expand"
+        )?.withSymbolConfiguration(.init(pointSize: 16, weight: .semibold))
+        expandIcon.contentTintColor = NSColor(calibratedWhite: 0.70, alpha: 1)
+        expandIcon.imageScaling = .scaleProportionallyDown
         addSubview(iconView)
         addSubview(label)
+        addSubview(expandIcon)
 
-        let tap = NSClickGestureRecognizer(target: self, action: #selector(handleTap))
+        let tap = NSClickGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         tap.allowedTouchTypes = .direct
         addGestureRecognizer(tap)
     }
@@ -64,10 +86,12 @@ final class StatusView: NSView {
         if presentationWidth <= 1 {
             iconView.isHidden = true
             label.isHidden = true
+            expandIcon.isHidden = true
             return
         }
         if compactWhenIdle {
             label.isHidden = true
+            expandIcon.isHidden = true
             iconView.isHidden = false
             iconView.frame = NSRect(
                 x: max((bounds.width - 18) / 2, 0),
@@ -79,10 +103,21 @@ final class StatusView: NSView {
         }
         label.isHidden = false
         iconView.isHidden = false
-        let maxTextWidth = max(bounds.width - 56, 60)
+        expandIcon.isHidden = false
+        expandIcon.frame = NSRect(
+            x: 10,
+            y: (bounds.height - 18) / 2,
+            width: 18,
+            height: 18
+        )
+        let maxTextWidth = max(bounds.width - 56 - Self.expandZone, 60)
+        label.fit(to: maxTextWidth)
         let textWidth = min(label.measuredWidth, maxTextWidth)
         let groupWidth = 16 + 8 + textWidth
-        let groupX = max((bounds.width - groupWidth) / 2, 8)
+        let groupX = max(
+            Self.expandZone + (bounds.width - Self.expandZone - groupWidth) / 2,
+            Self.expandZone
+        )
         iconView.frame = NSRect(x: groupX, y: (bounds.height - 16) / 2, width: 16, height: 16)
         label.frame = NSRect(x: groupX + 24, y: 0, width: textWidth, height: bounds.height)
     }
@@ -93,8 +128,17 @@ final class StatusView: NSView {
 
     // MARK: Tap
 
-    @objc private func handleTap() {
-        onTap?()
+    @objc private func handleTap(_ gesture: NSClickGestureRecognizer) {
+        handleClick(at: gesture.location(in: self))
+    }
+
+    /// Shared by the touch gesture and Pock's cursor mode.
+    func handleClick(at point: NSPoint) {
+        if point.x < Self.expandZone, !compactWhenIdle {
+            onExpand?()
+        } else {
+            onTap?()
+        }
     }
 
     func cycleSelection() {
@@ -120,8 +164,9 @@ final class StatusView: NSView {
         }
         selectedIndex = min(selectedIndex, max(activeAgents.count - 1, 0))
 
-        updateIdlePresentation()
+        // Text first: the width below is measured from it.
         refresh()
+        updateIdlePresentation()
         needsLayout = true
     }
 
@@ -164,14 +209,13 @@ final class StatusView: NSView {
     }
 
     private func refresh() {
-        guard !activeAgents.isEmpty else {
+        guard let agent = currentAgent() else {
             iconView.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
             iconView.contentTintColor = NSColor(calibratedWhite: 0.45, alpha: 1)
             setDisplayText("No agent running", textColor: .white, shimmer: false)
             setAmbient(.none)
             return
         }
-        let agent = activeAgents[selectedIndex]
         let brand = NSColor(hex: agent.color) ?? .white
         iconView.image = logo(for: agent.agent)
             ?? NSImage(systemSymbolName: agent.symbol, accessibilityDescription: nil)
@@ -209,7 +253,9 @@ final class StatusView: NSView {
             setAmbient(.breathe)
         default: // ready / idle
             iconView.contentTintColor = brand
-            setDisplayText(text, textColor: .white, shimmer: false)
+            // "X is ready" says nothing you did not already know. What is
+            // worth the space is how much of this agent is left.
+            setDisplayText(Self.usageText(for: agent) ?? text, textColor: .white, shimmer: false)
             setAmbient(.pulse)
         }
     }
@@ -222,7 +268,79 @@ final class StatusView: NSView {
         layout()
     }
 
+    /// The agent to show. The app in front wins outright — switching to
+    /// ChatGPT should move the bar to Codex even if Codex has never run this
+    /// session — and otherwise the busiest one keeps the slot.
+    func currentAgent() -> BridgeClient.AgentInfo? {
+        if let preferred = preferredAgent,
+           let match = agents.first(where: { $0.agent == preferred }) {
+            return match
+        }
+        guard !activeAgents.isEmpty else { return nil }
+        return activeAgents[min(selectedIndex, activeAgents.count - 1)]
+    }
+
+    /// Remaining quota, the way you would ask for it: how much is left and
+    /// when it comes back. `nil` when the agent has not reported limits yet,
+    /// in which case the caller keeps the plain status wording.
+    static func usageText(for agent: BridgeClient.AgentInfo, includeReset: Bool = true) -> String? {
+        guard let usage = agent.usage else { return nil }
+        var parts: [String] = []
+        if let window = usage.fiveHour {
+            parts.append(String(format: "5h %.0f%%", max(0, 100 - window.usedPercent)))
+        }
+        if let window = usage.sevenDay {
+            parts.append(String(format: "7d %.0f%%", max(0, 100 - window.usedPercent)))
+        }
+        // Claude publishes no windows; the size of the conversation is what it
+        // does expose, and it answers the same question — how much room is left.
+        if parts.isEmpty, let tokens = usage.contextTokens {
+            return "context " + compactTokens(tokens)
+        }
+        guard !parts.isEmpty else { return nil }
+        guard includeReset else { return parts.joined(separator: " · ") }
+        if let soonest = [usage.fiveHour, usage.sevenDay]
+            .compactMap({ $0?.resetsAt })
+            .filter({ $0 > Date().timeIntervalSince1970 })
+            .min() {
+            parts.append("↻ " + resetWording(at: soonest))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Token counts read at a glance: 472k rather than 471,606.
+    private static func compactTokens(_ tokens: Int) -> String {
+        if tokens >= 1_000_000 {
+            return String(format: "%.1fM", Double(tokens) / 1_000_000)
+        }
+        if tokens >= 1_000 {
+            return "\(tokens / 1_000)k"
+        }
+        return "\(tokens)"
+    }
+
+    /// A clock time for a reset later today, a weekday within the week, and a
+    /// date beyond that — whichever answers "when" in the fewest characters.
+    private static func resetWording(at timestamp: Double) -> String {
+        let date = Date(timeIntervalSince1970: timestamp)
+        let formatter = DateFormatter()
+        formatter.locale = Locale.current
+        let hoursAway = timestamp - Date().timeIntervalSince1970
+        if hoursAway < 20 * 3600 {
+            formatter.setLocalizedDateFormatFromTemplate("Hm")
+        } else if hoursAway < 6 * 24 * 3600 {
+            formatter.setLocalizedDateFormatFromTemplate("EEE")
+        } else {
+            formatter.setLocalizedDateFormatFromTemplate("Md")
+        }
+        return formatter.string(from: date)
+    }
+
     private func logo(for agent: String) -> NSImage? {
+        Self.logoImage(for: agent)
+    }
+
+    static func logoImage(for agent: String) -> NSImage? {
         let resource: String
         switch agent {
         case "claude": resource = "Claude"
@@ -230,7 +348,7 @@ final class StatusView: NSView {
         case "opencode": resource = "OpenCode"
         default: return nil
         }
-        guard let image = Bundle(for: type(of: self)).image(forResource: resource) else {
+        guard let image = Bundle(for: StatusView.self).image(forResource: resource) else {
             return nil
         }
         image.isTemplate = false

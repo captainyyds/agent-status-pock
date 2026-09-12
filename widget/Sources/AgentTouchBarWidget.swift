@@ -56,6 +56,16 @@ public final class AgentTouchBarWidget: NSObject, PKWidget {
     private let client = BridgeClient()
     private var pollTimer: Timer?
     private var isPolling = false
+    private let expanded = ExpandedController()
+    private var frontmostObserver: NSObjectProtocol?
+    private var latestAgents: [BridgeClient.AgentInfo] = []
+
+    /// Which agent each app stands for. Switching to ChatGPT should move the
+    /// bar to Codex; switching to anything else leaves the choice alone.
+    private static let agentByBundleID: [String: String] = [
+        "com.anthropic.claudefordesktop": "claude",
+        "com.openai.codex": "codex",
+    ]
 
     override public required init() {
         statusView = StatusView(frame: NSRect(x: 0, y: 0, width: StatusView.preferredWidth, height: 30))
@@ -64,13 +74,51 @@ public final class AgentTouchBarWidget: NSObject, PKWidget {
         statusView.onTap = { [weak self] in
             self?.statusView.cycleSelection()
         }
+        statusView.onExpand = { [weak self] in
+            self?.toggleExpanded()
+        }
+        expanded.onDismiss = { [weak self] in
+            self?.statusView.needsLayout = true
+        }
         AgentTouchBarWidget.shared = self
+        observeFrontmostApp()
     }
 
     // MARK: Lifecycle
 
     @objc public func viewWillAppear() {
+        applyFrontmost(NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
         startPolling()
+    }
+
+    // MARK: Expanded view
+
+    private func toggleExpanded() {
+        if expanded.isVisible {
+            expanded.hide()
+        } else {
+            expanded.show(agent: statusView.currentAgent())
+        }
+    }
+
+    // MARK: Following the front app
+
+    private func observeFrontmostApp() {
+        frontmostObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            self?.applyFrontmost(app?.bundleIdentifier)
+        }
+    }
+
+    /// An app that is not one of the agents leaves the current choice standing,
+    /// so switching to an editor does not blank the bar.
+    private func applyFrontmost(_ bundleID: String?) {
+        guard let bundleID, let agent = Self.agentByBundleID[bundleID] else { return }
+        statusView.preferredAgent = agent
     }
 
     @objc public func viewDidDisappear() {
@@ -100,7 +148,11 @@ public final class AgentTouchBarWidget: NSObject, PKWidget {
                 guard let self = self else { return }
                 self.isPolling = false
                 if let state = state {
+                    self.latestAgents = state.agents
                     self.statusView.apply(agents: state.agents)
+                    if self.expanded.isVisible {
+                        self.expanded.update(agent: self.statusView.currentAgent())
+                    }
                 }
             }
         }
@@ -115,7 +167,8 @@ extension AgentTouchBarWidget: PKScreenEdgeMouseDelegate {
         guard let statusView = self.view as? StatusView else { return }
         let local = statusView.convert(location, from: view)
         if statusView.bounds.contains(local) {
-            statusView.cycleSelection()
+            // Same split as the touch path: right edge expands, rest cycles.
+            statusView.handleClick(at: local)
         }
     }
 

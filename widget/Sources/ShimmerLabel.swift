@@ -16,6 +16,11 @@ final class ShimmerLabel: NSView {
     private var isShimmering = false
     private var font = NSFont.systemFont(ofSize: 13, weight: .semibold)
 
+    /// The label gives up a few points of type before it gives up words, so a
+    /// long tool line reads in full instead of trailing off in an ellipsis.
+    static let maximumFontSize: CGFloat = 13
+    static let minimumFontSize: CGFloat = 9
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
@@ -91,6 +96,37 @@ final class ShimmerLabel: NSView {
         let attrs: [NSAttributedString.Key: Any] = [.font: font]
         let width = (text as NSString).size(withAttributes: attrs).width
         return width + 6
+    }
+
+    /// Width the text wants at full size. The superview sizes the widget
+    /// against this before any shrinking happens.
+    var naturalWidth: CGFloat { width(at: Self.maximumFontSize) }
+
+    /// Adopts the largest size that fits `available`, or the floor when even
+    /// that overflows — only then does the tail get elided.
+    func fit(to available: CGFloat) {
+        for size in stride(from: Self.maximumFontSize, through: Self.minimumFontSize, by: -0.5) {
+            if width(at: size) <= available {
+                apply(fontSize: size)
+                return
+            }
+        }
+        apply(fontSize: Self.minimumFontSize)
+    }
+
+    private func width(at size: CGFloat) -> CGFloat {
+        let candidate = NSFont.systemFont(ofSize: size, weight: .semibold)
+        return (text as NSString).size(withAttributes: [.font: candidate]).width + 6
+    }
+
+    private func apply(fontSize size: CGFloat) {
+        guard font.pointSize != size else { return }
+        font = NSFont.systemFont(ofSize: size, weight: .semibold)
+        for layer in [baseLayer, brightLayer] {
+            layer.font = font
+            layer.fontSize = size
+        }
+        updateTextGeometry()
     }
 
     /// Text color for both layers (bright layer stays white for the sweep;

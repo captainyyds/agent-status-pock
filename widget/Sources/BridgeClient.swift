@@ -3,6 +3,22 @@ import AppKit
 
 final class BridgeClient {
 
+    struct UsageWindow: Codable {
+        let usedPercent: Double
+        let resetsAt: Double
+    }
+
+    struct AgentUsage: Codable {
+        let fiveHour: UsageWindow?
+        let sevenDay: UsageWindow?
+        let contextTokens: Int?
+        let sessionSeconds: Double?
+        let model: String?
+        let contextWindow: Int?
+        let cwd: String?
+        let updatedAt: Double
+    }
+
     struct AgentInfo: Codable {
         let agent: String
         let name: String
@@ -13,6 +29,8 @@ final class BridgeClient {
         let tool: String?
         let detail: String?
         let lastActive: Double
+        let cwd: String?
+        let usage: AgentUsage?
     }
 
     struct BridgeState: Codable {

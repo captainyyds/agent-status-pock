@@ -193,6 +193,31 @@ final class HTTPServer: @unchecked Sendable {
             let state = hub.snapshot()
             writeResponse(fd, status: 200, encodable: state, keepAlive: keepAlive)
 
+        case ("POST", "/v1/usage"):
+            guard let body = request.jsonBody() else {
+                writeResponse(fd, status: 400, json: ["error": "invalid body"], keepAlive: keepAlive)
+                return
+            }
+            let agent = AgentID(rawValue: body["agent"] as? String ?? "") ?? .claude
+            func window(_ key: String) -> UsageWindow? {
+                guard let raw = body[key] as? [String: Any],
+                      let used = raw["used_percent"] as? Double,
+                      let resets = raw["resets_at"] as? Double else { return nil }
+                return UsageWindow(usedPercent: used, resetsAt: resets)
+            }
+            let reported = AgentUsage(
+                fiveHour: window("five_hour"),
+                sevenDay: window("seven_day"),
+                contextTokens: body["context_tokens"] as? Int,
+                sessionSeconds: body["session_seconds"] as? Double,
+                model: body["model"] as? String,
+                contextWindow: body["context_window"] as? Int,
+                cwd: body["cwd"] as? String,
+                updatedAt: Date().timeIntervalSince1970
+            )
+            hub.recordUsage(reported, for: agent)
+            writeResponse(fd, status: 200, json: ["ok": true], keepAlive: keepAlive)
+
         case ("POST", "/v1/event"):
             guard let body = request.jsonBody() else {
                 writeResponse(fd, status: 400, json: ["error": "invalid body"], keepAlive: keepAlive)
@@ -203,7 +228,8 @@ final class HTTPServer: @unchecked Sendable {
             let tool = body["tool"] as? String
             let detail = body["detail"] as? String
             let ts = body["ts"] as? Double
-            hub.record(event: event, agent: agent, tool: tool, detail: detail, ts: ts)
+            hub.record(event: event, agent: agent, tool: tool, detail: detail, ts: ts,
+                       cwd: body["cwd"] as? String)
             writeResponse(fd, status: 200, json: ["ok": true], keepAlive: keepAlive)
 
         default:

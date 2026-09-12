@@ -15,6 +15,11 @@ import urllib.request
 
 BRIDGE = os.environ.get("AGENTBRIDGE_URL", "http://127.0.0.1:3939")
 
+# Set once per invocation from the hook payload, which names the project the
+# agent is working in. Worth a field on the expanded bar when several sessions
+# are running at once.
+CWD = None
+
 
 def post_json(url, payload, timeout=1.0):
     req = urllib.request.Request(
@@ -31,6 +36,8 @@ def post_json(url, payload, timeout=1.0):
 
 def stamp(payload):
     payload["ts"] = time.time_ns() / 1e9
+    if CWD:
+        payload["cwd"] = CWD
     return payload
 
 
@@ -53,11 +60,14 @@ def summarize(tool_name, tool_input):
 
 
 def main():
+    global CWD
     agent = sys.argv[1] if len(sys.argv) > 1 else "claude"
     try:
         data = json.load(sys.stdin)
     except Exception:
         sys.exit(0)
+
+    CWD = data.get("cwd") or data.get("workspace", {}).get("current_dir")
 
     event = data.get("hook_event_name", "")
     tool_name = data.get("tool_name", "")
