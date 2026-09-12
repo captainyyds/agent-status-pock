@@ -77,6 +77,11 @@ final class AgentHub: @unchecked Sendable {
     /// Events older than the newest applied one (minus tolerance) are stale.
     private let staleTolerance: Double = 0.05
 
+    /// How long "ready" outlives its last event before it lapses to idle.
+    /// Long enough to sit through a coffee, short enough that a closed app
+    /// stops showing as open.
+    private static let readyLapse: Double = 10 * 60
+
     private struct HeldEvent {
         let event: String
         let tool: String?
@@ -163,10 +168,26 @@ final class AgentHub: @unchecked Sendable {
         }
         lastEventAt[agent] = eventTime
 
+        let now = Date().timeIntervalSince1970
+
+        // A finished turn reports "Response ready" for six seconds, but Claude
+        // Code emits a trailing `thinking` a second or two after `Stop` — the
+        // tail of its own bookkeeping rather than new work. That overwrote the
+        // one signal saying an answer was waiting, and the bar then sat on
+        // "Thinking" until the 45s inactivity timeout. Hold the window against
+        // it; a tool, an answer or a question still breaks through at once.
+        if event == "thinking",
+           let current = statuses[agent],
+           current.status == .responseReady,
+           let until = current.transientUntil, until > now {
+            lock.unlock()
+            log("[\(agent.rawValue)] ignored trailing 'thinking' inside the response-ready window")
+            return
+        }
+
         // Display dwell: keep an active tool state visible for at least
         // `toolDisplayDwell` before a quieter state replaces it, so fast
         // tools (Read/Edit in <300ms) don't flick by unseen.
-        let now = Date().timeIntervalSince1970
         if let current = statuses[agent],
            current.status == .working,
            isQuietTransition(event),
@@ -331,6 +352,13 @@ final class AgentHub: @unchecked Sendable {
                     s.tool = nil
                     s.detail = nil
                     s.transientUntil = nil
+                }
+                // An agent that quit without a SessionEnd — the app was closed,
+                // or the terminal went away — left "ready" standing for ever.
+                // Let it lapse so the bar stops claiming a session is open.
+                if s.status == .ready, now - s.lastActive > Self.readyLapse {
+                    s.status = .idle
+                    s.label = "No agent running"
                 }
                 return s
             }
