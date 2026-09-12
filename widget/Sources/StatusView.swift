@@ -162,13 +162,12 @@ final class StatusView: NSView {
 
     func apply(agents: [BridgeClient.AgentInfo]) {
         self.agents = agents
-        // Retired agents have had their application quit; idle ones never had
-        // a session, or lost it. Either way there is nothing to report, and a
-        // bar still claiming "Response ready" for a closed app is just wrong.
+        // Only a retired agent — one whose application has quit — leaves the
+        // bar. Being idle is not a reason to hide: that is exactly when the
+        // limits are worth the space, and an agent the user just switched to
+        // has usually not run anything yet.
         retiredAgents.subtract(agents.filter { Self.isBusy($0.status) }.map(\.agent))
-        activeAgents = agents.filter {
-            $0.lastActive > 0 && $0.status != "idle" && !retiredAgents.contains($0.agent)
-        }
+        activeAgents = agents.filter { $0.lastActive > 0 && !retiredAgents.contains($0.agent) }
 
         if let pinnedSince = pinnedSince, Date().timeIntervalSince(pinnedSince) > 300 {
             pinned = false
@@ -288,7 +287,7 @@ final class StatusView: NSView {
     /// session — and otherwise the busiest one keeps the slot.
     func currentAgent() -> BridgeClient.AgentInfo? {
         if let preferred = preferredAgent, !retiredAgents.contains(preferred),
-           let match = agents.first(where: { $0.agent == preferred }), match.status != "idle" {
+           let match = agents.first(where: { $0.agent == preferred }) {
             return match
         }
         guard !activeAgents.isEmpty else { return nil }

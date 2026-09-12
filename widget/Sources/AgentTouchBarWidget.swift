@@ -89,7 +89,7 @@ public final class AgentTouchBarWidget: NSObject, PKWidget {
     // MARK: Lifecycle
 
     @objc public func viewWillAppear() {
-        retireAgentsWithoutApps()
+        refreshRetirement(busy: [])
         applyFrontmost(NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
         startPolling()
     }
@@ -133,13 +133,22 @@ public final class AgentTouchBarWidget: NSObject, PKWidget {
         }
     }
 
-    /// Agents whose application is not running when the widget starts up begin
-    /// retired, so a bar restored after a quit does not show a stale session.
-    private func retireAgentsWithoutApps() {
+    /// Re-derives which agents have no application running. Catching the
+    /// termination notification is not enough on its own — miss one, because
+    /// the widget was reloading or Pock restarted, and the bar stays wrong for
+    /// ever. Deriving it from what is actually running is self-correcting.
+    ///
+    /// A busy agent is never retired: Claude Code also runs in a terminal,
+    /// where there is no application to find, and its events are proof enough.
+    private func refreshRetirement(busy: Set<String>) {
         let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
-        for (bundleID, agent) in Self.agentByBundleID where !running.contains(bundleID) {
-            retired.insert(agent)
+        var next: Set<String> = []
+        for (bundleID, agent) in Self.agentByBundleID
+        where !running.contains(bundleID) && !busy.contains(agent) {
+            next.insert(agent)
         }
+        guard next != retired else { return }
+        retired = next
         statusView.retiredAgents = retired
     }
 
@@ -180,6 +189,8 @@ public final class AgentTouchBarWidget: NSObject, PKWidget {
                 self.isPolling = false
                 if let state = state {
                     self.latestAgents = state.agents
+                    let busy = Set(state.agents.filter { StatusView.isBusy($0.status) }.map(\.agent))
+                    self.refreshRetirement(busy: busy)
                     self.statusView.apply(agents: state.agents)
                     if self.expanded.isVisible {
                         self.expanded.update(agent: self.statusView.currentAgent())
