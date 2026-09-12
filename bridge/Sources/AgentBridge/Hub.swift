@@ -329,12 +329,23 @@ final class AgentHub: @unchecked Sendable {
             status.detail = nil
             status.transientUntil = nil
 
-        case "stop", "session_end", "answer_done":
+        case "stop", "answer_done":
             status.status = .responseReady
             status.label = "Response ready"
             status.tool = nil
             status.detail = nil
             status.transientUntil = now + 6
+
+        // Not the same thing as `stop`, which only ends a turn. The session is
+        // over, so there is nothing waiting to be read and nothing to hold the
+        // bar for. Saying "Response ready" for a session the user just closed
+        // is how a shut-down agent kept sitting there.
+        case "session_end":
+            status.status = .idle
+            status.label = "No agent running"
+            status.tool = nil
+            status.detail = nil
+            status.transientUntil = nil
 
         case "notification":
             if status.status == .idle || status.status == .ready {
