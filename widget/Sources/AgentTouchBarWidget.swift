@@ -89,7 +89,7 @@ public final class AgentTouchBarWidget: NSObject, PKWidget {
     // MARK: Lifecycle
 
     @objc public func viewWillAppear() {
-        refreshRetirement(busy: [])
+        refreshRetirement(midTurn: [])
         applyFrontmost(NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
         startPolling()
     }
@@ -140,11 +140,11 @@ public final class AgentTouchBarWidget: NSObject, PKWidget {
     ///
     /// A busy agent is never retired: Claude Code also runs in a terminal,
     /// where there is no application to find, and its events are proof enough.
-    private func refreshRetirement(busy: Set<String>) {
+    private func refreshRetirement(midTurn: Set<String>) {
         let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
         var next: Set<String> = []
         for (bundleID, agent) in Self.agentByBundleID
-        where !running.contains(bundleID) && !busy.contains(agent) {
+        where !running.contains(bundleID) && !midTurn.contains(agent) {
             next.insert(agent)
         }
         guard next != retired else { return }
@@ -189,8 +189,8 @@ public final class AgentTouchBarWidget: NSObject, PKWidget {
                 self.isPolling = false
                 if let state = state {
                     self.latestAgents = state.agents
-                    let busy = Set(state.agents.filter { StatusView.isBusy($0.status) }.map(\.agent))
-                    self.refreshRetirement(busy: busy)
+                    let midTurn = Set(state.agents.filter { StatusView.isMidTurn($0.status) }.map(\.agent))
+                    self.refreshRetirement(midTurn: midTurn)
                     self.statusView.apply(agents: state.agents)
                     if self.expanded.isVisible {
                         self.expanded.update(agent: self.statusView.currentAgent())

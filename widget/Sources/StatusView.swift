@@ -30,8 +30,19 @@ final class StatusView: NSView {
         didSet { guard retiredAgents != oldValue else { return }; refresh() }
     }
 
+    /// Shown-and-interesting, for display purposes.
     static func isBusy(_ status: String) -> Bool {
         ["working", "thinking", "answering", "needsInput", "connected", "responseReady"].contains(status)
+    }
+
+    /// Mid-turn, for retirement purposes — a narrower question. Only these
+    /// states have events still flowing, which is what stands in for proof of
+    /// life when there is no application to look for, as with Claude Code in a
+    /// terminal. "Response ready", "needs input" and "connected" are resting
+    /// states: events have stopped, so a missing application settles it, and
+    /// treating them as busy is what left a quit app reading "Response ready".
+    static func isMidTurn(_ status: String) -> Bool {
+        ["working", "thinking", "answering"].contains(status)
     }
 
     var preferredAgent: String? {
