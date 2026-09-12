@@ -25,6 +25,15 @@ final class StatusView: NSView {
 
     /// Bundle id of the agent app in front, when it is one. The bar follows
     /// whatever the user switched to rather than whatever spoke last.
+    /// Agents whose application has quit. Cleared as soon as one speaks again.
+    var retiredAgents: Set<String> = [] {
+        didSet { guard retiredAgents != oldValue else { return }; refresh() }
+    }
+
+    static func isBusy(_ status: String) -> Bool {
+        ["working", "thinking", "answering", "needsInput", "connected", "responseReady"].contains(status)
+    }
+
     var preferredAgent: String? {
         didSet { guard preferredAgent != oldValue else { return }; pinned = false; refresh() } }
 
@@ -153,7 +162,13 @@ final class StatusView: NSView {
 
     func apply(agents: [BridgeClient.AgentInfo]) {
         self.agents = agents
-        activeAgents = agents.filter { $0.lastActive > 0 }
+        // Retired agents have had their application quit; idle ones never had
+        // a session, or lost it. Either way there is nothing to report, and a
+        // bar still claiming "Response ready" for a closed app is just wrong.
+        retiredAgents.subtract(agents.filter { Self.isBusy($0.status) }.map(\.agent))
+        activeAgents = agents.filter {
+            $0.lastActive > 0 && $0.status != "idle" && !retiredAgents.contains($0.agent)
+        }
 
         if let pinnedSince = pinnedSince, Date().timeIntervalSince(pinnedSince) > 300 {
             pinned = false
@@ -272,8 +287,8 @@ final class StatusView: NSView {
     /// ChatGPT should move the bar to Codex even if Codex has never run this
     /// session — and otherwise the busiest one keeps the slot.
     func currentAgent() -> BridgeClient.AgentInfo? {
-        if let preferred = preferredAgent,
-           let match = agents.first(where: { $0.agent == preferred }) {
+        if let preferred = preferredAgent, !retiredAgents.contains(preferred),
+           let match = agents.first(where: { $0.agent == preferred }), match.status != "idle" {
             return match
         }
         guard !activeAgents.isEmpty else { return nil }

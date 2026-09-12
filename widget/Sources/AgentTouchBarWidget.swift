@@ -58,6 +58,8 @@ public final class AgentTouchBarWidget: NSObject, PKWidget {
     private var isPolling = false
     private let expanded = ExpandedController()
     private var frontmostObserver: NSObjectProtocol?
+    private var lifecycleObservers: [NSObjectProtocol] = []
+    private var retired: Set<String> = []
     private var latestAgents: [BridgeClient.AgentInfo] = []
 
     /// Which agent each app stands for. Switching to ChatGPT should move the
@@ -87,6 +89,7 @@ public final class AgentTouchBarWidget: NSObject, PKWidget {
     // MARK: Lifecycle
 
     @objc public func viewWillAppear() {
+        retireAgentsWithoutApps()
         applyFrontmost(NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
         startPolling()
     }
@@ -104,7 +107,8 @@ public final class AgentTouchBarWidget: NSObject, PKWidget {
     // MARK: Following the front app
 
     private func observeFrontmostApp() {
-        frontmostObserver = NSWorkspace.shared.notificationCenter.addObserver(
+        let center = NSWorkspace.shared.notificationCenter
+        frontmostObserver = center.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
@@ -112,12 +116,39 @@ public final class AgentTouchBarWidget: NSObject, PKWidget {
             let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             self?.applyFrontmost(app?.bundleIdentifier)
         }
+
+        // An agent whose application has quit should leave the bar at once
+        // rather than sit on its last status until a timeout notices.
+        for (name, retiring) in [(NSWorkspace.didTerminateApplicationNotification, true),
+                                 (NSWorkspace.didLaunchApplicationNotification, false)] {
+            lifecycleObservers.append(center.addObserver(forName: name, object: nil, queue: .main) {
+                [weak self] notification in
+                guard let self,
+                      let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                      let bundleID = app.bundleIdentifier,
+                      let agent = Self.agentByBundleID[bundleID] else { return }
+                if retiring { self.retired.insert(agent) } else { self.retired.remove(agent) }
+                self.statusView.retiredAgents = self.retired
+            })
+        }
+    }
+
+    /// Agents whose application is not running when the widget starts up begin
+    /// retired, so a bar restored after a quit does not show a stale session.
+    private func retireAgentsWithoutApps() {
+        let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+        for (bundleID, agent) in Self.agentByBundleID where !running.contains(bundleID) {
+            retired.insert(agent)
+        }
+        statusView.retiredAgents = retired
     }
 
     /// An app that is not one of the agents leaves the current choice standing,
     /// so switching to an editor does not blank the bar.
     private func applyFrontmost(_ bundleID: String?) {
         guard let bundleID, let agent = Self.agentByBundleID[bundleID] else { return }
+        // Bringing an app forward proves it is running, whatever we thought.
+        if retired.remove(agent) != nil { statusView.retiredAgents = retired }
         statusView.preferredAgent = agent
     }
 

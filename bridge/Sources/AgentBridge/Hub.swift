@@ -109,9 +109,10 @@ final class AgentHub: @unchecked Sendable {
     private let staleTolerance: Double = 0.05
 
     /// How long "ready" outlives its last event before it lapses to idle.
-    /// Long enough to sit through a coffee, short enough that a closed app
-    /// stops showing as open.
-    private static let readyLapse: Double = 10 * 60
+    /// This is only the backstop for sessions with no application to watch —
+    /// a terminal that was closed, say. A desktop agent's own quit is seen
+    /// directly by the widget and does not wait for this.
+    private static let readyLapse: Double = 2 * 60
 
     private struct HeldEvent {
         let event: String
