@@ -16,7 +16,12 @@ final class StatusView: NSView {
     /// its intrinsic size, so resizing it to fit the text drew over the
     /// neighbouring widget instead of pushing it along. Long text is handled
     /// by shrinking the type instead — see `ShimmerLabel.fit(to:)`.
-    static let preferredWidth: CGFloat = 360
+    static let preferredWidth: CGFloat = 440
+
+    /// Glyph box, matched to the other icons on the bar rather than chosen for
+    /// this widget alone — the status icon used to be 16pt beside an 18pt
+    /// expand arrow, which read as two sizes rather than one set.
+    static let glyphSize: CGFloat = 20
 
     // MARK: Callbacks
 
@@ -50,7 +55,7 @@ final class StatusView: NSView {
 
     /// Tap target on the left that opens the full-bar view. Wide enough to
     /// hit without looking, which is the whole point of a Touch Bar control.
-    private static let expandZone: CGFloat = 38
+    private static let expandZone: CGFloat = 40
 
     // MARK: Subviews
 
@@ -114,32 +119,34 @@ final class StatusView: NSView {
             expandIcon.isHidden = true
             iconView.isHidden = false
             iconView.frame = NSRect(
-                x: max((bounds.width - 18) / 2, 0),
-                y: (bounds.height - 18) / 2,
-                width: 18,
-                height: 18
+                x: max((bounds.width - Self.glyphSize) / 2, 0),
+                y: (bounds.height - Self.glyphSize) / 2,
+                width: Self.glyphSize,
+                height: Self.glyphSize
             )
             return
         }
         label.isHidden = false
         iconView.isHidden = false
         expandIcon.isHidden = false
-        expandIcon.frame = NSRect(
-            x: 10,
-            y: (bounds.height - 18) / 2,
-            width: 18,
-            height: 18
-        )
-        let maxTextWidth = max(bounds.width - 56 - Self.expandZone, 60)
+        let glyph = Self.glyphSize
+        let glyphY = (bounds.height - glyph) / 2
+        expandIcon.frame = NSRect(x: 10, y: glyphY, width: glyph, height: glyph)
+
+        // Icon, a gap, then the text — sized as one group so the pair stays
+        // centred in whatever is left after the expand zone.
+        let gap: CGFloat = 8
+        let trailing: CGFloat = 20
+        let maxTextWidth = max(bounds.width - Self.expandZone - glyph - gap - trailing, 60)
         label.fit(to: maxTextWidth)
         let textWidth = min(label.measuredWidth, maxTextWidth)
-        let groupWidth = 16 + 8 + textWidth
+        let groupWidth = glyph + gap + textWidth
         let groupX = max(
             Self.expandZone + (bounds.width - Self.expandZone - groupWidth) / 2,
             Self.expandZone
         )
-        iconView.frame = NSRect(x: groupX, y: (bounds.height - 16) / 2, width: 16, height: 16)
-        label.frame = NSRect(x: groupX + 24, y: 0, width: textWidth, height: bounds.height)
+        iconView.frame = NSRect(x: groupX, y: glyphY, width: glyph, height: glyph)
+        label.frame = NSRect(x: groupX + glyph + gap, y: 0, width: textWidth, height: bounds.height)
     }
 
     required init?(coder: NSCoder) {
@@ -208,9 +215,11 @@ final class StatusView: NSView {
         compactWhenIdle = shouldCollapse
         let nextWidth: CGFloat
         if !widgetEnabled {
-            nextWidth = 18
+            nextWidth = Self.glyphSize + 4
         } else if shouldCollapse {
-            nextWidth = mode == "active" ? 18 : 36
+            // Room for the glyph plus a little air; the narrow variant is the
+            // one that is nearly transparent anyway.
+            nextWidth = mode == "active" ? Self.glyphSize + 4 : Self.glyphSize + 20
         } else {
             nextWidth = Self.preferredWidth
         }

@@ -14,24 +14,27 @@ final class ShimmerLabel: NSView {
     private let maskGradient = CAGradientLayer()
     private var shimmerAnimation: CABasicAnimation?
     private var isShimmering = false
-    private var font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+    private var font = NSFont.systemFont(ofSize: ShimmerLabel.maximumFontSize, weight: .semibold)
 
     /// The label gives up a few points of type before it gives up words, so a
     /// long tool line reads in full instead of trailing off in an ellipsis.
-    static let maximumFontSize: CGFloat = 13
-    static let minimumFontSize: CGFloat = 9
+    /// The ceiling is what the status reads at most of the time, so it is set
+    /// to match the rest of the bar rather than to the longest line that could
+    /// ever arrive.
+    static let maximumFontSize: CGFloat = 15
+    static let minimumFontSize: CGFloat = 10
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
 
         let scale = NSScreen.main?.backingScaleFactor ?? 2
-        font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        font = NSFont.systemFont(ofSize: Self.maximumFontSize, weight: .semibold)
 
         for layer in [baseLayer, brightLayer] {
             layer.contentsScale = scale
             layer.font = font
-            layer.fontSize = 13
+            layer.fontSize = Self.maximumFontSize
             layer.foregroundColor = NSColor.white.cgColor
             layer.alignmentMode = .left
             layer.isWrapped = false
@@ -70,8 +73,11 @@ final class ShimmerLabel: NSView {
 
     /// Vertically centers the single text line inside the 30pt bar height.
     private func updateTextGeometry() {
-        let attrs: [NSAttributedString.Key: Any] = [.font: font]
-        let lineHeight = ("Ag" as NSString).size(withAttributes: attrs).height
+        // The font's own bounding box, not the height a sample string happens
+        // to measure: the string measurement comes up short of what the glyphs
+        // actually need, which centres the line a point or two high and clips
+        // descenders at the larger sizes.
+        let lineHeight = font.boundingRectForFont.height
         let y = max((bounds.height - lineHeight) / 2, 0)
         let textRect = CGRect(x: 0, y: y, width: bounds.width, height: lineHeight)
         CATransaction.begin()
