@@ -42,6 +42,11 @@ func snapshot(_ view: NSView, width: CGFloat, file: String) {
         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
     ) else { fatalError("no rep") }
+    // Without this the rep is treated as 880x60 *points*, so the view is drawn
+    // at 1x into the bottom-left quarter and the rest of the PNG is empty
+    // background — which reads as "the widget sits low and left" when it does
+    // not. Declaring the point size makes it a proper 2x render of the bar.
+    rep.size = NSSize(width: width, height: 30)
     let ctx = NSGraphicsContext(bitmapImageRep: rep)!
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = ctx
@@ -55,7 +60,7 @@ func snapshot(_ view: NSView, width: CGFloat, file: String) {
 }
 
 func agent(_ a: String, _ n: String, _ s: String, _ c: String, _ st: String, _ l: String, _ la: Double) -> BridgeClient.AgentInfo {
-    BridgeClient.AgentInfo(agent: a, name: n, symbol: s, color: c, status: st, label: l, tool: nil, detail: nil, lastActive: la)
+    BridgeClient.AgentInfo(agent: a, name: n, symbol: s, color: c, status: st, label: l, tool: nil, detail: nil, lastActive: la, cwd: nil, usage: nil)
 }
 
 @main
