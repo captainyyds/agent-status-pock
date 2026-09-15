@@ -45,26 +45,64 @@ final class BridgeClient {
         let urlString = env["AGENTBRIDGE_URL"] ?? "http://127.0.0.1:3939"
         baseURL = URL(string: urlString) ?? URL(string: "http://127.0.0.1:3939")!
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 2.0
-        config.timeoutIntervalForResource = 3.0
+        // Long enough to outlast a parked request. The bridge holds a state
+        // request until something changes, so a two-second timeout would have
+        // cancelled every one of them.
+        config.timeoutIntervalForRequest = 35
+        config.timeoutIntervalForResource = 40
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         session = URLSession(configuration: config)
     }
 
-    func fetchState(completion: @escaping (BridgeState?) -> Void) {
-        let url = baseURL.appendingPathComponent("/v1/state")
+    /// Asks for the state and waits for it to differ from `fingerprint`.
+    ///
+    /// Passing nil answers immediately; passing the fingerprint from the last
+    /// answer parks the request on the bridge until the bar would look
+    /// different. That turns a poll several times a second into one idle
+    /// connection, and delivers a change the moment it happens rather than on
+    /// the next tick.
+    @discardableResult
+    func watchState(
+        since fingerprint: String?,
+        completion: @escaping (BridgeState?, String?) -> Void
+    ) -> URLSessionTask {
+        // Built through URLComponents, not by pasting a query onto a path.
+        // `appendingPathComponent` treats the whole string as one path
+        // component and percent-encodes the "?" into "%3F", so the query became
+        // part of the path, the bridge saw no parameters and answered 404 —
+        // which sent this straight to the error branch, cleared the
+        // fingerprint, and backed off two seconds before asking again without
+        // one. The long poll never actually parked: it was two-second polling
+        // with a wasted 404 every cycle.
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent("/v1/state"),
+            resolvingAgainstBaseURL: false
+        )
+        if let fingerprint {
+            components?.queryItems = [
+                URLQueryItem(name: "since", value: fingerprint),
+                URLQueryItem(name: "wait", value: "25"),
+            ]
+        }
+        guard let url = components?.url else {
+            completion(nil, nil)
+            return URLSession.shared.dataTask(with: baseURL)
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.timeoutInterval = 2.0
-        session.dataTask(with: request) { data, response, error in
+        request.timeoutInterval = 30
+
+        let task = session.dataTask(with: request) { data, response, _ in
             guard let http = response as? HTTPURLResponse, http.statusCode == 200,
                   let data = data else {
-                completion(nil)
+                completion(nil, nil)
                 return
             }
             let state = try? JSONDecoder().decode(BridgeState.self, from: data)
-            completion(state)
-        }.resume()
+            completion(state, http.value(forHTTPHeaderField: "X-State-Fingerprint"))
+        }
+        task.resume()
+        return task
     }
 }
 

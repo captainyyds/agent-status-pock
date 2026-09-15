@@ -54,7 +54,15 @@ public final class AgentTouchBarWidget: NSObject, PKWidget {
 
     private let statusView: StatusView
     private let client = BridgeClient()
-    private var pollTimer: Timer?
+    private var watchTask: URLSessionTask?
+    private var fingerprint: String?
+    private var isStopped = false
+
+    /// Enumerating every running application is not free, and retirement is
+    /// re-derived on each update. Reuse the answer briefly so a burst of tool
+    /// calls does not walk the process table once per event.
+    private var runningApps: Set<String> = []
+    private var runningAppsAt: Date = .distantPast
     private var isPolling = false
     private let expanded = ExpandedController()
     private var frontmostObserver: NSObjectProtocol?
@@ -89,6 +97,7 @@ public final class AgentTouchBarWidget: NSObject, PKWidget {
     // MARK: Lifecycle
 
     @objc public func viewWillAppear() {
+        isStopped = false
         refreshRetirement(midTurn: [])
         applyFrontmost(NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
         startPolling()
@@ -141,7 +150,11 @@ public final class AgentTouchBarWidget: NSObject, PKWidget {
     /// A busy agent is never retired: Claude Code also runs in a terminal,
     /// where there is no application to find, and its events are proof enough.
     private func refreshRetirement(midTurn: Set<String>) {
-        let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+        if Date().timeIntervalSince(runningAppsAt) > 2 {
+            runningApps = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+            runningAppsAt = Date()
+        }
+        let running = runningApps
         var next: Set<String> = []
         for (bundleID, agent) in Self.agentByBundleID
         where !running.contains(bundleID) && !midTurn.contains(agent) {
@@ -165,37 +178,45 @@ public final class AgentTouchBarWidget: NSObject, PKWidget {
         stopPolling()
     }
 
+    /// Waits on the bridge rather than asking it repeatedly. Each answer
+    /// immediately re-arms the next wait, so there is exactly one request in
+    /// flight and it costs nothing while nothing is happening.
     private func startPolling() {
-        guard pollTimer == nil else { return }
-        let timer = Timer(timeInterval: 0.3, repeats: true) { [weak self] _ in
-            self?.poll()
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        pollTimer = timer
+        guard watchTask == nil else { return }
         poll()
     }
 
     private func stopPolling() {
-        pollTimer?.invalidate()
-        pollTimer = nil
+        isStopped = true
+        watchTask?.cancel()
+        watchTask = nil
     }
 
+    /// One request at a time, parked on the bridge until something changes,
+    /// re-armed the moment it answers.
     private func poll() {
-        guard !isPolling else { return }
-        isPolling = true
-        client.fetchState { [weak self] state in
+        guard !isStopped, watchTask == nil else { return }
+        watchTask = client.watchState(since: fingerprint) { [weak self] state, fingerprint in
             DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.isPolling = false
-                if let state = state {
-                    self.latestAgents = state.agents
-                    let midTurn = Set(state.agents.filter { StatusView.isMidTurn($0.status) }.map(\.agent))
-                    self.refreshRetirement(midTurn: midTurn)
-                    self.statusView.apply(agents: state.agents)
-                    if self.expanded.isVisible {
-                        self.expanded.update(agent: self.statusView.currentAgent())
-                    }
+                guard let self, !self.isStopped else { return }
+                self.watchTask = nil
+
+                guard let state else {
+                    // The bridge is unreachable or restarting. Back off rather
+                    // than spinning on a failing connection.
+                    self.fingerprint = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.poll() }
+                    return
                 }
+                self.fingerprint = fingerprint
+                self.latestAgents = state.agents
+                let midTurn = Set(state.agents.filter { StatusView.isMidTurn($0.status) }.map(\.agent))
+                self.refreshRetirement(midTurn: midTurn)
+                self.statusView.apply(agents: state.agents)
+                if self.expanded.isVisible {
+                    self.expanded.update(agent: self.statusView.currentAgent())
+                }
+                self.poll()
             }
         }
     }

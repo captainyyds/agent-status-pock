@@ -190,8 +190,21 @@ final class HTTPServer: @unchecked Sendable {
             writeResponse(fd, status: 200, json: ["ok": true], keepAlive: keepAlive)
 
         case ("GET", "/v1/state"):
-            let state = hub.snapshot()
-            writeResponse(fd, status: 200, encodable: state, keepAlive: keepAlive)
+            // A plain GET answers at once. With `since`, the request is parked
+            // until the bar would look different — so an idle agent costs one
+            // open connection instead of three round trips a second, and a
+            // change is delivered as it happens rather than up to 300ms later.
+            let query = Self.query(in: request.path)
+            if let since = query["since"] {
+                let seconds = min(Double(query["wait"] ?? "") ?? 25, 60)
+                let (state, fingerprint) = hub.waitForChange(fingerprint: since, timeout: seconds)
+                writeResponse(fd, status: 200, encodable: state,
+                              keepAlive: keepAlive, etag: fingerprint)
+            } else {
+                let state = hub.snapshot()
+                writeResponse(fd, status: 200, encodable: state,
+                              keepAlive: keepAlive, etag: AgentHub.fingerprint(of: state))
+            }
 
         case ("POST", "/v1/usage"):
             guard let body = request.jsonBody() else {
@@ -244,14 +257,29 @@ final class HTTPServer: @unchecked Sendable {
         write(fd, data: data, status: status, keepAlive: keepAlive)
     }
 
-    private func writeResponse(_ fd: Int32, status: Int, encodable: Encodable, keepAlive: Bool) {
+    private func writeResponse(
+        _ fd: Int32, status: Int, encodable: Encodable, keepAlive: Bool, etag: String? = nil
+    ) {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = (try? encoder.encode(encodable)) ?? Data("{}".utf8)
-        write(fd, data: data, status: status, keepAlive: keepAlive)
+        write(fd, data: data, status: status, keepAlive: keepAlive, etag: etag)
     }
 
-    private func write(_ fd: Int32, data: Data, status: Int, keepAlive: Bool) {
+    /// Query parameters. Only the state endpoint takes any.
+    private static func query(in path: String) -> [String: String] {
+        guard let raw = path.split(separator: "?").dropFirst().first else { return [:] }
+        var out: [String: String] = [:]
+        for pair in raw.split(separator: "&") {
+            let parts = pair.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            let value = String(parts[1])
+            out[String(parts[0])] = value.removingPercentEncoding ?? value
+        }
+        return out
+    }
+
+    private func write(_ fd: Int32, data: Data, status: Int, keepAlive: Bool, etag: String? = nil) {
         let reason: String
         switch status {
         case 200: reason = "OK"
@@ -262,6 +290,7 @@ final class HTTPServer: @unchecked Sendable {
         var head = "HTTP/1.1 \(status) \(reason)\r\n"
         head += "Content-Type: application/json\r\n"
         head += "Content-Length: \(data.count)\r\n"
+        if let etag { head += "X-State-Fingerprint: \(etag)\r\n" }
         if keepAlive {
             head += "Connection: keep-alive\r\n"
             head += "Keep-Alive: timeout=\(Self.idleTimeout)\r\n\r\n"

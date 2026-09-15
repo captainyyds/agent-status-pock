@@ -96,6 +96,10 @@ struct BridgeState: Codable {
 final class AgentHub: @unchecked Sendable {
 
     private let lock = NSLock()
+
+    /// Woken whenever an event lands, so a waiting request does not have to
+    /// discover the change on its next sweep.
+    private let changeGate = NSCondition()
     private var statuses: [AgentID: AgentSnapshot] = [:]
     private var usage: [AgentID: AgentUsage] = [:]
     // Per-agent ordering + display-dwell bookkeeping.
@@ -366,6 +370,7 @@ final class AgentHub: @unchecked Sendable {
         }
         statuses[agent] = status
         log("[\(agent.rawValue)] \(event) tool=\(tool ?? "-") detail=\((detail ?? "-").prefix(60))")
+        announceChange()
     }
 
     /// Stores limits reported by an agent. Claude posts these to `/v1/usage`
@@ -401,6 +406,49 @@ final class AgentHub: @unchecked Sendable {
         entry.updatedAt = Date().timeIntervalSince1970
         usage[.claude] = entry
         lock.unlock()
+    }
+
+    /// Wakes anything parked in `waitForChange`.
+    private func announceChange() {
+        changeGate.lock()
+        changeGate.broadcast()
+        changeGate.unlock()
+    }
+
+    /// Parks until the rendered state differs from `fingerprint`, or the
+    /// deadline passes. Returns the state either way.
+    ///
+    /// Events wake this immediately. It also re-checks a few times a second on
+    /// its own, because some transitions are driven by the clock rather than by
+    /// an event — "Response ready" lapsing, the inactivity timeout, a ready
+    /// session going idle — and those arrive without anything to announce them.
+    func waitForChange(fingerprint: String?, timeout: TimeInterval) -> (BridgeState, String) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            let state = snapshot()
+            let current = Self.fingerprint(of: state)
+            if current != fingerprint || Date() >= deadline { return (state, current) }
+            changeGate.lock()
+            changeGate.wait(until: min(deadline, Date().addingTimeInterval(0.25)))
+            changeGate.unlock()
+        }
+    }
+
+    /// Identifies what the bar would draw. Comparing this rather than a
+    /// revision counter means a request only returns when something actually
+    /// looks different, whatever moved it.
+    static func fingerprint(of state: BridgeState) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = (try? encoder.encode(state)) ?? Data()
+        var hasher = Hasher()
+        hasher.combine(data)
+        // Unsigned, so the value is plain hex with no leading minus. A minus
+        // survives neither URL-encoding on the way out nor a query parser that
+        // does not decode on the way back in, and a fingerprint that never
+        // matches turns every parked request into an immediate answer — which
+        // is a busy loop wearing the costume of a long poll.
+        return String(UInt64(bitPattern: Int64(hasher.finalize())), radix: 16)
     }
 
     func snapshot() -> BridgeState {
