@@ -54,6 +54,17 @@ final class BridgeClient {
         session = URLSession(configuration: config)
     }
 
+    /// Tells the bridge someone is about to look at an agent's limits. The
+    /// bridge decides whether a reading is due; nothing waits on the answer.
+    func requestUsageRefresh(for agent: String) {
+        var request = URLRequest(url: baseURL.appendingPathComponent("/v1/usage/refresh"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["agent": agent])
+        request.timeoutInterval = 5
+        session.dataTask(with: request).resume()
+    }
+
     /// Asks for the state and waits for it to differ from `fingerprint`.
     ///
     /// Passing nil answers immediately; passing the fingerprint from the last

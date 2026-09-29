@@ -7,30 +7,17 @@ let server = HTTPServer(hub: hub, port: port)
 
 signal(SIGPIPE, SIG_IGN)
 
-// Neither agent hands its limits to a hook, so they are picked up on timers.
-//
-// Claude's come from files on disk and cost nothing to re-read, so every thirty
-// seconds. Codex's have to be asked of the Codex client, which means starting
-// one and a request to the backend, so every five minutes: its windows are
-// hours and days long, and a reading five minutes old is not a stale one.
-DispatchQueue.global(qos: .utility).async {
-    hub.refreshCodexUsage()
-    hub.refreshClaudeUsage()
-}
-let claudeTimer = Timer(timeInterval: 30, repeats: true) { _ in
-    DispatchQueue.global(qos: .utility).async { hub.refreshClaudeUsage() }
-}
-let codexTimer = Timer(timeInterval: 300, repeats: true) { _ in
-    DispatchQueue.global(qos: .utility).async { hub.refreshCodexUsage() }
-}
-RunLoop.main.add(claudeTimer, forMode: .common)
-RunLoop.main.add(codexTimer, forMode: .common)
+// Limits are read once now, so there is something to show, and after that only
+// when they can have moved: a turn ending, or the agent being brought to the
+// front. See `AgentHub.requestUsage`. Nothing is read on a timer.
+hub.requestUsage(for: .codex, force: true)
+hub.requestUsage(for: .claude, force: true)
 
 // The accept loop blocks for as long as the bridge lives, so it gets a thread
 // of its own. It used to run right here on the main thread, which meant the run
-// loop below was never reached and neither timer above ever fired: limits were
-// read once at launch and served unchanged for as long as the bridge ran —
-// measured at fourteen days, long after both of Codex's windows had reset.
+// loop below was never reached — so the refresh timer that used to sit above
+// never fired once, and limits read at launch were served unchanged for
+// fourteen days, long after both of Codex's windows had reset.
 Thread.detachNewThread {
     do {
         try server.start()

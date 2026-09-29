@@ -172,6 +172,11 @@ public final class AgentTouchBarWidget: NSObject, PKWidget {
         // Bringing an app forward proves it is running, whatever we thought.
         if retired.remove(agent) != nil { statusView.retiredAgents = retired }
         statusView.preferredAgent = agent
+        // Switching to an agent is one of the two moments its limits get
+        // looked at — the other is a turn ending, which the bridge hears about
+        // itself. This is the only thing that makes the bridge read them now;
+        // there is no timer behind it.
+        client.requestUsageRefresh(for: agent)
     }
 
     @objc public func viewDidDisappear() {

@@ -186,6 +186,13 @@ final class AgentHub: @unchecked Sendable {
     // MARK: Events
 
     func record(event: String, agent: AgentID, tool: String?, detail: String?, ts: Double?, cwd: String? = nil) {
+        // Ahead of every early return below: however this event is treated
+        // for display, a turn that ended has spent something.
+        // Codex is given a moment for the backend to count the turn.
+        if Self.turnEnders.contains(event) {
+            requestUsage(for: agent, force: true, after: agent == .codex ? 2 : 0)
+        }
+
         if let cwd, !cwd.isEmpty {
             lock.lock()
             statuses[agent]?.cwd = cwd
@@ -406,6 +413,60 @@ final class AgentHub: @unchecked Sendable {
         entry.updatedAt = Date().timeIntervalSince1970
         usage[.claude] = entry
         lock.unlock()
+    }
+
+    // MARK: Reading limits on demand
+
+    /// Events after which an agent's limits have moved.
+    private static let turnEnders: Set<String> = ["stop", "answer_done"]
+
+    private var usageReading: Set<AgentID> = []
+    private var usageRereadWanted: Set<AgentID> = []
+    private var usageReadAt: [AgentID: Date] = [:]
+
+    /// Reads an agent's limits again — on an event, never on a timer.
+    ///
+    /// Limits only move when a turn is spent, so that is when they are read:
+    /// when a turn ends, and when the agent is brought to the front, which are
+    /// the two moments anyone looks. In between nothing is read at all. A
+    /// window resetting in the meantime needs no reading either; see
+    /// `rollingOver`.
+    ///
+    /// `force` is for a turn ending, which always changes the numbers. A
+    /// front-app switch is not forced, so flicking back and forth asks at most
+    /// once a minute. The difference matters for Codex, whose reading starts a
+    /// client and goes to the network; Claude's is a file read either way.
+    func requestUsage(for agent: AgentID, force: Bool, after delay: TimeInterval = 0) {
+        lock.lock()
+        if usageReading.contains(agent) {
+            // One already under way may have started before this turn ended,
+            // so a forced request asks for another once it lands.
+            if force { usageRereadWanted.insert(agent) }
+            lock.unlock()
+            return
+        }
+        if !force, let last = usageReadAt[agent], Date().timeIntervalSince(last) < 60 {
+            lock.unlock()
+            return
+        }
+        usageReading.insert(agent)
+        lock.unlock()
+
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            switch agent {
+            case .codex: self.refreshCodexUsage()
+            case .claude: self.refreshClaudeUsage()
+            case .opencode: break
+            }
+            self.lock.lock()
+            self.usageReading.remove(agent)
+            self.usageReadAt[agent] = Date()
+            let again = self.usageRereadWanted.remove(agent) != nil
+            self.lock.unlock()
+            self.announceChange()
+            if again { self.requestUsage(for: agent, force: true) }
+        }
     }
 
     /// Wakes anything parked in `waitForChange`.

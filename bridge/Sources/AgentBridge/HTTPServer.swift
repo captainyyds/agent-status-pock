@@ -206,6 +206,17 @@ final class HTTPServer: @unchecked Sendable {
                               keepAlive: keepAlive, etag: AgentHub.fingerprint(of: state))
             }
 
+        // The widget asks for this when an agent comes to the front. It is a
+        // request, not an order: the hub decides whether a reading is due.
+        case ("POST", "/v1/usage/refresh"):
+            let body = request.jsonBody() ?? [:]
+            guard let agent = AgentID(rawValue: body["agent"] as? String ?? "") else {
+                writeResponse(fd, status: 400, json: ["error": "unknown agent"], keepAlive: keepAlive)
+                return
+            }
+            hub.requestUsage(for: agent, force: false)
+            writeResponse(fd, status: 202, json: ["ok": true], keepAlive: keepAlive)
+
         case ("POST", "/v1/usage"):
             guard let body = request.jsonBody() else {
                 writeResponse(fd, status: 400, json: ["error": "invalid body"], keepAlive: keepAlive)
