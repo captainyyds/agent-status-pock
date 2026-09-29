@@ -16,7 +16,13 @@ final class StatusView: NSView {
     /// its intrinsic size, so resizing it to fit the text drew over the
     /// neighbouring widget instead of pushing it along. Long text is handled
     /// by shrinking the type instead — see `ShimmerLabel.fit(to:)`.
-    static let preferredWidth: CGFloat = 440
+    ///
+    /// The strip is full at this width: measured on a 685pt Pock region with
+    /// Media Bar collapsed, the Dock took 187pt for five apps and the flexible
+    /// space between them was down to 8pt. Every 37pt added here is one fewer
+    /// app the Dock can show, so this is a trade rather than free room — 480
+    /// was chosen over 440 for tool lines, at the cost of one Dock slot.
+    static let preferredWidth: CGFloat = 480
 
     /// Glyph box, matched to the other icons on the bar rather than chosen for
     /// this widget alone — the status icon used to be 16pt beside an 18pt

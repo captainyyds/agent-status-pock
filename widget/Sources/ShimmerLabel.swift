@@ -38,7 +38,10 @@ final class ShimmerLabel: NSView {
             layer.foregroundColor = NSColor.white.cgColor
             layer.alignmentMode = .left
             layer.isWrapped = false
-            layer.truncationMode = .end
+            // Middle, not end: a tool line's most telling part is usually its
+            // last — the file a command reads or writes — and truncating the
+            // end threw exactly that away.
+            layer.truncationMode = .middle
             self.layer?.addSublayer(layer)
         }
 

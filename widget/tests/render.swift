@@ -111,6 +111,33 @@ struct RenderTest {
         RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         snapshot(statusView, width: StatusView.preferredWidth, file: "render-ready.png")
 
+        // The two states Codex spends its time in now that its hooks fire: a
+        // long command running, and resting with its limits on show.
+        let now = Date().timeIntervalSince1970
+        statusView.apply(agents: [
+            BridgeClient.AgentInfo(
+                agent: "codex", name: "Codex", symbol: "bolt.fill", color: "10A37F",
+                status: "working", label: "Running",
+                tool: "Bash", detail: "sed -n '1,240p' ~/.codex/skills/.system/openai-docs/SKILL.md",
+                lastActive: now, cwd: nil, usage: nil),
+        ])
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        snapshot(statusView, width: StatusView.preferredWidth, file: "render-codex-working.png")
+
+        statusView.apply(agents: [
+            BridgeClient.AgentInfo(
+                agent: "codex", name: "Codex", symbol: "bolt.fill", color: "10A37F",
+                status: "ready", label: "Codex is ready",
+                tool: nil, detail: nil, lastActive: now, cwd: nil,
+                usage: BridgeClient.AgentUsage(
+                    fiveHour: nil,
+                    sevenDay: BridgeClient.UsageWindow(usedPercent: 86, resetsAt: now + 134 * 3600),
+                    contextTokens: nil, sessionSeconds: nil, model: nil, contextWindow: nil,
+                    cwd: nil, updatedAt: now)),
+        ])
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        snapshot(statusView, width: StatusView.preferredWidth, file: "render-codex-ready.png")
+
         // No agent running.
         statusView.apply(agents: [
             agent("claude", "Claude", "sparkles", "D97757", "idle", "No agent running", 0),
