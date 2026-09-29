@@ -326,11 +326,13 @@ final class StatusView: NSView {
     static func usageText(for agent: BridgeClient.AgentInfo, includeReset: Bool = true) -> String? {
         guard let usage = agent.usage else { return nil }
         var parts: [String] = []
+        // "left", spelled out: a bare "7d 14%" reads just as easily as 14%
+        // spent, and the difference is the whole point of showing it.
         if let window = usage.fiveHour {
-            parts.append(String(format: "5h %.0f%%", max(0, 100 - window.usedPercent)))
+            parts.append(String(format: "5h %.0f%% left", max(0, 100 - window.usedPercent)))
         }
         if let window = usage.sevenDay {
-            parts.append(String(format: "7d %.0f%%", max(0, 100 - window.usedPercent)))
+            parts.append(String(format: "7d %.0f%% left", max(0, 100 - window.usedPercent)))
         }
         // Claude publishes no windows; the size of the conversation is what it
         // does expose, and it answers the same question — how much room is left.
@@ -365,13 +367,16 @@ final class StatusView: NSView {
         let date = Date(timeIntervalSince1970: timestamp)
         let formatter = DateFormatter()
         formatter.locale = Locale.current
+        // Always with the time. Beyond twenty hours this used to give only the
+        // weekday, which made sense on a bar a third narrower; at the current
+        // width "Sun" leaves out when on Sunday, which is the part you plan by.
         let hoursAway = timestamp - Date().timeIntervalSince1970
         if hoursAway < 20 * 3600 {
             formatter.setLocalizedDateFormatFromTemplate("Hm")
         } else if hoursAway < 6 * 24 * 3600 {
-            formatter.setLocalizedDateFormatFromTemplate("EEE")
+            formatter.setLocalizedDateFormatFromTemplate("EEEHm")
         } else {
-            formatter.setLocalizedDateFormatFromTemplate("Md")
+            formatter.setLocalizedDateFormatFromTemplate("MdHm")
         }
         return formatter.string(from: date)
     }
