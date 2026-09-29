@@ -20,9 +20,10 @@ final class StatusView: NSView {
     /// The strip is full at this width: measured on a 685pt Pock region with
     /// Media Bar collapsed, the Dock took 187pt for five apps and the flexible
     /// space between them was down to 8pt. Every 37pt added here is one fewer
-    /// app the Dock can show, so this is a trade rather than free room — 480
-    /// was chosen over 440 for tool lines, at the cost of one Dock slot.
-    static let preferredWidth: CGFloat = 480
+    /// app the Dock can show. 480 was tried for long tool lines and given back:
+    /// middle truncation keeps the telling end of those in view, and the
+    /// resting quota line fits here with room to spare.
+    static let preferredWidth: CGFloat = 440
 
     /// Glyph box, matched to the other icons on the bar rather than chosen for
     /// this widget alone — the status icon used to be 16pt beside an 18pt
