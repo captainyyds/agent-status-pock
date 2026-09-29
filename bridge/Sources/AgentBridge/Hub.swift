@@ -51,7 +51,7 @@ struct UsageWindow: Codable {
 }
 
 /// What an agent has left. Claude reports this through its status line; Codex
-/// writes it into its own session log. Either way it reaches us locally.
+/// is asked through its own app-server, falling back to its session log.
 struct AgentUsage: Codable {
     var fiveHour: UsageWindow?
     var sevenDay: UsageWindow?
@@ -422,6 +422,31 @@ final class AgentHub: @unchecked Sendable {
     /// its own, because some transitions are driven by the clock rather than by
     /// an event — "Response ready" lapsing, the inactivity timeout, a ready
     /// session going idle — and those arrive without anything to announce them.
+    /// A window whose reset time has passed has started over, whatever the
+    /// last reading said about it.
+    ///
+    /// Readings are taken minutes apart at best, and when the source is quiet
+    /// they can be far older: this once served a reading seventeen days old,
+    /// with both windows long since reset and the bar still showing them 27%
+    /// and 21% spent. Nothing seen since says what has been used in the new
+    /// window, so it reads as unused until the next reading says otherwise.
+    ///
+    /// Applied here rather than when the reading is stored, because this runs
+    /// on every recheck of a long poll: when a reset time passes, what the bar
+    /// would draw changes, the fingerprint moves, and the widget hears about
+    /// it within a quarter of a second. A reset time of zero means the source
+    /// did not give one, not that it passed in 1970.
+    static func rollingOver(_ usage: AgentUsage, at now: TimeInterval) -> AgentUsage {
+        var usage = usage
+        if let window = usage.fiveHour, window.resetsAt > 0, window.resetsAt <= now {
+            usage.fiveHour?.usedPercent = 0
+        }
+        if let window = usage.sevenDay, window.resetsAt > 0, window.resetsAt <= now {
+            usage.sevenDay?.usedPercent = 0
+        }
+        return usage
+    }
+
     func waitForChange(fingerprint: String?, timeout: TimeInterval) -> (BridgeState, String) {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
@@ -460,7 +485,7 @@ final class AgentHub: @unchecked Sendable {
             .filter { isEnabled($0.agent) }
             .map { snapshot -> AgentSnapshot in
                 var s = snapshot
-                s.usage = usage[s.agent]
+                s.usage = usage[s.agent].map { Self.rollingOver($0, at: now) }
                 if let until = s.transientUntil, until < now {
                     s.transientUntil = nil
                     switch s.status {
