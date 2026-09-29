@@ -617,14 +617,30 @@ final class AgentHub: @unchecked Sendable {
 
     /// Short, human target for the current action: file basename, command
     /// head, or search pattern.
+    /// Tools whose detail is a file path rather than a command line.
+    private static let fileTools: Set<String> = ["Read", "Edit", "Write", "MultiEdit", "NotebookEdit"]
+
     private func summarizedTarget(toolName: String, detail: String?) -> String {
         guard var detail = detail, !detail.isEmpty else { return "" }
         detail = detail.split(separator: "|").first.map(String.init) ?? detail
         detail = detail.trimmingCharacters(in: .whitespacesAndNewlines)
-        if detail.hasPrefix("/") { // file path → basename
+        if Self.fileTools.contains(toolName) || (detail.hasPrefix("/") && !detail.contains(where: \.isWhitespace)) {
+            // A path: its file name says enough.
             detail = (detail as NSString).lastPathComponent
+        } else if detail.hasPrefix("/"), let space = detail.firstIndex(where: \.isWhitespace) {
+            // A command run by its absolute path: the executable shortens to
+            // its name and the arguments stay. Treating the whole line as a
+            // path is what turned `/usr/bin/python3 … 2>/dev/null` into "null"
+            // — the last path component of the line, not of the program.
+            let program = (String(detail[..<space]) as NSString).lastPathComponent
+            detail = program + detail[space...]
         }
         if detail.hasPrefix("{") { return "" }
-        return String(detail.prefix(48))
+        // Bounded, not fitted. Fitting is the widget's job: it truncates in
+        // the middle, which keeps the end of a command — usually the file it
+        // touches — in view. Cutting here to 48 characters threw that end away
+        // before the widget ever saw it, so the middle truncation had nothing
+        // left to keep. 140 matches what the hooks send.
+        return String(detail.prefix(140))
     }
 }
